@@ -8,9 +8,15 @@ package dmcunrar
 size_t frReadGo_cgo(void *opaque, void *buffer, size_t n);
 int frSeekGo_cgo(void *opaque, uint64_t offset);
 
+bool efCallbackGo_cgo(void *opaque, void **buffer, size_t *buffer_size, size_t uncompressed_size, dmc_unrar_return *err);
+
 typedef struct fr_opaque_tag {
 	int64_t id;
 } fr_opaque;
+
+typedef struct ef_opaque_tag {
+	int64_t id;
+} ef_opaque;
 */
 import "C"
 
@@ -29,6 +35,13 @@ type FileReader struct {
 	offset int64
 	size   int64
 	opaque *C.fr_opaque
+	err    error
+}
+
+type ExtractedFile struct {
+	id     int64
+	writer io.Writer
+	opaque *C.ef_opaque
 	err    error
 }
 
@@ -109,6 +122,11 @@ func (a *Archive) Free() {
 		a.fr.Free()
 		a.fr = nil
 	}
+
+	if a.archive != nil {
+		C.dmc_unrar_archive_close(a.archive)
+		a.archive = nil
+	}
 }
 
 func (a *Archive) GetFileCount() int64 {
@@ -146,6 +164,40 @@ func (a *Archive) GetFilename(i int64) (string, error) {
 	return C.GoString(filename), nil
 }
 
+func (a *Archive) GetFileStat(i int64) *C.dmc_unrar_file {
+	return C.dmc_unrar_get_file_stat(a.archive, C.size_t(i))
+}
+
+func (a *Archive) FileIsDirectory(i int64) bool {
+	return C.dmc_unrar_file_is_directory(a.archive, C.size_t(i)) == true
+}
+
+func (fs *C.dmc_unrar_file) GetUncompressedSize() int64 {
+	return int64(fs.uncompressed_size)
+}
+
+func (a *Archive) ExtractFile(ef *ExtractedFile, index int64) error {
+	buffer_size := 256 * 1024
+	buffer := unsafe.Pointer(C.malloc(C.size_t(buffer_size)))
+	defer C.free(buffer)
+
+	err := checkError("dmc_unrar_extract_file_with_callback", C.dmc_unrar_extract_file_with_callback(
+		a.archive,                 // archive
+		C.size_t(index),           // index
+		buffer,                    // buffer
+		C.size_t(buffer_size),     // buffer_size
+		nil,                       // uncompressed_size
+		true,                      // validate_crc
+		unsafe.Pointer(ef.opaque), // opaque
+		(C.dmc_unrar_extract_callback_func)(unsafe.Pointer(C.efCallbackGo_cgo)), // callback
+	))
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func NewFileReader(reader io.ReaderAt, size int64) *FileReader {
 	opaque := (*C.fr_opaque)(C.malloc(C.sizeof_fr_opaque))
 
@@ -158,6 +210,18 @@ func NewFileReader(reader io.ReaderAt, size int64) *FileReader {
 	reserveFrId(fr)
 
 	return fr
+}
+
+func NewExtractedFile(writer io.Writer) *ExtractedFile {
+	opaque := (*C.ef_opaque)(C.malloc(C.sizeof_ef_opaque))
+
+	ef := &ExtractedFile{
+		writer: writer,
+		opaque: opaque,
+	}
+	reserveEfId(ef)
+
+	return ef
 }
 
 func (fr *FileReader) Seek(offset int64, whence int) (int64, error) {
@@ -182,6 +246,18 @@ func (fr *FileReader) Free() {
 	if fr.opaque != nil {
 		C.free(unsafe.Pointer(fr.opaque))
 		fr.opaque = nil
+	}
+}
+
+func (ef *ExtractedFile) Free() {
+	if ef.id > 0 {
+		freeEfId(ef.id)
+		ef.id = 0
+	}
+
+	if ef.opaque != nil {
+		C.free(unsafe.Pointer(ef.opaque))
+		ef.opaque = nil
 	}
 }
 
@@ -242,6 +318,39 @@ func frSeekGo(opaque_ unsafe.Pointer, offset C.uint64_t) C.int {
 	}
 
 	return 0
+}
+
+//export efCallbackGo
+func efCallbackGo(opaque_ unsafe.Pointer, bufPtrPtr unsafe.Pointer, bufferSize *C.size_t, uncompressedSize C.size_t, ret *C.dmc_unrar_return) C.bool {
+	opaque := (*C.ef_opaque)(opaque_)
+	id := int64(opaque.id)
+
+	p, ok := extractedFiles.Load(id)
+	if !ok {
+		return false
+	}
+	ef, ok := (p).(*ExtractedFile)
+	if !ok {
+		return false
+	}
+
+	bufPtr := *(*unsafe.Pointer)(bufPtrPtr)
+
+	size := int64(uncompressedSize)
+	h := reflect.SliceHeader{
+		Data: uintptr(bufPtr),
+		Cap:  int(size),
+		Len:  int(size),
+	}
+	buf := *(*[]byte)(unsafe.Pointer(&h))
+
+	_, err := ef.writer.Write(buf)
+	if err != nil {
+		ef.err = err
+		return false
+	}
+
+	return true
 }
 
 func checkError(name string, code C.dmc_unrar_return) error {

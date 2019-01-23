@@ -24,3 +24,19 @@ func reserveFrId(obj *FileReader) {
 func freeFrId(id int64) {
 	fileReaders.Delete(id)
 }
+
+//==============================
+// ExtractedFile
+//==============================
+
+var extractedFiles sync.Map
+
+func reserveEfId(obj *ExtractedFile) {
+	obj.id = atomic.AddInt64(&seed, 1)
+	obj.opaque.id = C.long(obj.id)
+	extractedFiles.Store(obj.id, obj)
+}
+
+func freeEfId(id int64) {
+	extractedFiles.Delete(id)
+}
