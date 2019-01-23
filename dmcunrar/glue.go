@@ -16,7 +16,6 @@ import "C"
 
 import (
 	"io"
-	"log"
 	"os"
 	"reflect"
 	"unsafe"
@@ -24,85 +23,130 @@ import (
 	"github.com/pkg/errors"
 )
 
-type ReaderAtCloser interface {
-	io.ReaderAt
-	io.Closer
-}
-
 type FileReader struct {
 	id     int64
-	reader ReaderAtCloser
+	reader io.ReaderAt
 	offset int64
 	size   int64
 	opaque *C.fr_opaque
-	io     *C.dmc_unrar_io
 	err    error
 }
 
 type Archive struct {
+	fr      *FileReader
 	archive *C.dmc_unrar_archive
 }
 
-func Demo(file string) error {
-	var archive C.dmc_unrar_archive
+func OpenArchiveFromPath(name string) (*Archive, error) {
+	f, err := os.Open(name)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	stats, err := f.Stat()
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	size := stats.Size()
+	return OpenArchive(f, size)
+}
+
+func OpenArchive(reader io.ReaderAt, size int64) (*Archive, error) {
+	fr := NewFileReader(reader, size)
+	success := false
+	defer func() {
+		if !success {
+			fr.Free()
+		}
+	}()
+
+	a, err := openArchiveInternal(fr)
+	if err != nil {
+		return nil, err
+	}
+
+	success = true
+	return a, err
+}
+
+func openArchiveInternal(fr *FileReader) (*Archive, error) {
+	archive := (*C.dmc_unrar_archive)(C.malloc(C.sizeof_dmc_unrar_archive))
+	success := false
+	defer func() {
+		if !success {
+			C.free(unsafe.Pointer(archive))
+		}
+	}()
 
 	var err error
 
-	err = checkError("dmc_unrar_archive_init", C.dmc_unrar_archive_init(&archive))
+	err = checkError("dmc_unrar_archive_init", C.dmc_unrar_archive_init(archive))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	f, err := os.Open(file)
+	archive.io.func_read = (C.dmc_unrar_read_func)(unsafe.Pointer(C.frReadGo_cgo))
+	archive.io.func_seek = (C.dmc_unrar_seek_func)(unsafe.Pointer(C.frSeekGo_cgo))
+	archive.io.opaque = unsafe.Pointer(fr.opaque)
+
+	err = checkError("dmc_unrar_archive_open", C.dmc_unrar_archive_open(archive, C.uint64_t(fr.size)))
 	if err != nil {
-		return errors.WithStack(err)
-	}
-	stats, err := f.Stat()
-	if err != nil {
-		return errors.WithStack(err)
+		return nil, err
 	}
 
-	fr, err := NewFileReader(f, stats.Size())
-	if err != nil {
-		return errors.WithStack(err)
+	a := &Archive{
+		fr:      fr,
+		archive: archive,
 	}
 
-	archive.io = *fr.io
-
-	err = checkError("dmc_unrar_archive_open", C.dmc_unrar_archive_open(&archive, C.uint64_t(stats.Size())))
-	if err != nil {
-		return err
-	}
-
-	fileCount := int64(C.dmc_unrar_get_file_count(&archive))
-	log.Printf("File count: %d", fileCount)
-
-	for i := int64(0); i < fileCount; i++ {
-		size := C.dmc_unrar_get_filename(
-			&archive,
-			C.size_t(i),
-			(*C.char)(nil),
-			0,
-		)
-
-		filename := (*C.char)(C.malloc(size))
-		C.dmc_unrar_get_filename(
-			&archive,
-			C.size_t(i),
-			filename,
-			size,
-		)
-
-		name := C.GoString(filename)
-		C.free(unsafe.Pointer(filename))
-		log.Printf("%d: %s", i, name)
-	}
-
-	return nil
+	success = true
+	return a, nil
 }
 
-func NewFileReader(reader ReaderAtCloser, size int64) (*FileReader, error) {
-	io := (*C.dmc_unrar_io)(C.malloc(C.sizeof_dmc_unrar_io))
+func (a *Archive) Free() {
+	if a.fr != nil {
+		a.fr.Free()
+		a.fr = nil
+	}
+}
+
+func (a *Archive) GetFileCount() int64 {
+	return int64(C.dmc_unrar_get_file_count(a.archive))
+}
+
+func (a *Archive) GetFilename(i int64) (string, error) {
+	size := C.dmc_unrar_get_filename(
+		a.archive,
+		C.size_t(i),
+		(*C.char)(nil),
+		0,
+	)
+	if size == 0 {
+		return "", errors.Errorf("0-length filename for entry %d", i)
+	}
+
+	filename := (*C.char)(C.malloc(size))
+	defer C.free(unsafe.Pointer(filename))
+	size = C.dmc_unrar_get_filename(
+		a.archive,
+		C.size_t(i),
+		filename,
+		size,
+	)
+	if size == 0 {
+		return "", errors.Errorf("0-length filename for entry %d", i)
+	}
+
+	C.dmc_unrar_unicode_make_valid_utf8(filename)
+	if *filename == 0 {
+		return "", errors.Errorf("0-length filename (after make_valid_utf8) for entry %d", i)
+	}
+
+	return C.GoString(filename), nil
+}
+
+func NewFileReader(reader io.ReaderAt, size int64) *FileReader {
 	opaque := (*C.fr_opaque)(C.malloc(C.sizeof_fr_opaque))
 
 	fr := &FileReader{
@@ -110,15 +154,10 @@ func NewFileReader(reader ReaderAtCloser, size int64) (*FileReader, error) {
 		offset: 0,
 		size:   size,
 		opaque: opaque,
-		io:     io,
 	}
 	reserveFrId(fr)
 
-	io.func_read = (C.dmc_unrar_read_func)(unsafe.Pointer(C.frReadGo_cgo))
-	io.func_seek = (C.dmc_unrar_seek_func)(unsafe.Pointer(C.frSeekGo_cgo))
-	io.opaque = unsafe.Pointer(opaque)
-
-	return fr, nil
+	return fr
 }
 
 func (fr *FileReader) Seek(offset int64, whence int) (int64, error) {
@@ -132,6 +171,18 @@ func (fr *FileReader) Seek(offset int64, whence int) (int64, error) {
 	}
 
 	return fr.offset, nil
+}
+
+func (fr *FileReader) Free() {
+	if fr.id > 0 {
+		freeFrId(fr.id)
+		fr.id = 0
+	}
+
+	if fr.opaque != nil {
+		C.free(unsafe.Pointer(fr.opaque))
+		fr.opaque = nil
+	}
 }
 
 //export frReadGo
