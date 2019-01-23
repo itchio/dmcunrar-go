@@ -172,6 +172,10 @@ func (a *Archive) FileIsDirectory(i int64) bool {
 	return C.dmc_unrar_file_is_directory(a.archive, C.size_t(i)) == true
 }
 
+func (a *Archive) FileIsSupported(i int64) error {
+	return checkError("dmc_unrar_file_is_supported", C.dmc_unrar_file_is_supported(a.archive, C.size_t(i)))
+}
+
 func (fs *C.dmc_unrar_file) GetUncompressedSize() int64 {
 	return int64(fs.uncompressed_size)
 }

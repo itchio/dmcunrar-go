@@ -3629,12 +3629,12 @@ dmc_unrar_return dmc_unrar_extract_file_with_callback(dmc_unrar_archive *archive
 		return DMC_UNRAR_ARCHIVE_EMPTY;
 
 	if (uncompressed_size)
-	  *uncompressed_size = 0;
+		*uncompressed_size = 0;
 
 	{
 		dmc_unrar_return is_supported = dmc_unrar_file_is_supported(archive, index);
 		if (is_supported != DMC_UNRAR_OK)
-		  return is_supported;
+			return is_supported;
 	}
 
 	{
@@ -3643,16 +3643,19 @@ dmc_unrar_return dmc_unrar_extract_file_with_callback(dmc_unrar_archive *archive
 
 		{
 			dmc_unrar_return uncompressed =
-			  dmc_unrar_file_extract(archive, file, buffer, buffer_size, &output_size,
-			  	&crc, opaque, callback);
+				dmc_unrar_file_extract(archive, file, buffer, buffer_size, &output_size,
+				                       &crc, opaque, callback);
 
 			if (uncompressed != DMC_UNRAR_OK)
 				return uncompressed;
-
-			if (validate_crc)
-				if (file->file.has_crc && (file->file.crc != crc))
-					return DMC_UNRAR_FILE_CRC32_FAIL;  
 		}
+
+		if (uncompressed_size)
+			*uncompressed_size = output_size;
+
+		if (validate_crc)
+			if (file->file.has_crc && (file->file.crc != crc))
+				return DMC_UNRAR_FILE_CRC32_FAIL;
 	}
 
 	return DMC_UNRAR_OK;
@@ -3660,7 +3663,10 @@ dmc_unrar_return dmc_unrar_extract_file_with_callback(dmc_unrar_archive *archive
 
 dmc_unrar_return dmc_unrar_extract_file_to_mem(dmc_unrar_archive *archive, size_t index,
 		void *buffer, size_t buffer_size, size_t *uncompressed_size, bool validate_crc) {
-	return dmc_unrar_extract_file_with_callback(archive, index, buffer, buffer_size, uncompressed_size, validate_crc, NULL, &dmc_unrar_extract_callback_mem);
+	return
+		dmc_unrar_extract_file_with_callback(archive, index, buffer,
+		                                     buffer_size, uncompressed_size, validate_crc,
+		                                     NULL, &dmc_unrar_extract_callback_mem);
 }
 
 /** Extract a file entry into a dynamically allocated heap buffer. */

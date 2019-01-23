@@ -43,6 +43,11 @@ func main() {
 		if stat != nil {
 			uncompressedSize += stat.GetUncompressedSize()
 		}
+
+		if !archive.FileIsDirectory(i) {
+			err := archive.FileIsSupported(i)
+			must(err)
+		}
 	}
 	log.Printf("Extracting %d files, %s uncompressed", archive.GetFileCount(), progress.FormatBytes(uncompressedSize))
 
