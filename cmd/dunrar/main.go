@@ -1,11 +1,13 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"github.com/pkg/errors"
 
 	"github.com/itchio/go-itchio/itchfs"
 	"github.com/itchio/wharf/counter"
@@ -16,10 +18,28 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		log.Fatalf("usage: %s FILE.rar", os.Args[0])
+	exec := os.Args[0]
+	args := os.Args[1:]
+	verbose := false
+
+	var nameArgs []string
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			switch arg {
+			case "-v":
+				verbose = true
+			default:
+				log.Fatalf("unsupported flag: %s", arg)
+			}
+		} else {
+			nameArgs = append(nameArgs, arg)
+		}
 	}
-	name := os.Args[1]
+
+	if len(nameArgs) < 1 {
+		log.Fatalf("usage: %s FILE.rar", exec)
+	}
+	name := nameArgs[0]
 
 	eos.RegisterHandler(&itchfs.ItchFS{})
 
@@ -37,6 +57,8 @@ func main() {
 	defer archive.Free()
 
 	log.Printf("Listing contents...")
+	numUnsupported := 0
+
 	var uncompressedSize int64
 	for i := int64(0); i < archive.GetFileCount(); i++ {
 		stat := archive.GetFileStat(i)
@@ -46,7 +68,11 @@ func main() {
 
 		if !archive.FileIsDirectory(i) {
 			err := archive.FileIsSupported(i)
-			must(err)
+			if err != nil {
+				numUnsupported++
+				name, _ := archive.GetFilename(i)
+				log.Printf("%+v", errors.WithMessagef(err, "for file %s", name))
+			}
 		}
 	}
 	log.Printf("Extracting %d files, %s uncompressed", archive.GetFileCount(), progress.FormatBytes(uncompressedSize))
@@ -57,6 +83,11 @@ func main() {
 		stat := archive.GetFileStat(i)
 		if stat == nil {
 			must(errors.New("null file stat!"))
+		}
+
+		if verbose {
+			log.Printf("Extracting (%s)", name)
+			log.Printf("Stat: %#v", stat)
 		}
 
 		dest := filepath.Join("out", name)
@@ -97,6 +128,10 @@ func main() {
 
 	for i := int64(0); i < archive.GetFileCount(); i++ {
 		extractEntry(i)
+	}
+
+	if numUnsupported > 0 {
+		must(errors.Errorf("had %d unsupported files", numUnsupported))
 	}
 }
 
