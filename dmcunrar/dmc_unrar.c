@@ -1,6 +1,6 @@
 /* dmc_unrar - A dependency-free, single-file FLOSS unrar library
  *
- * Copyright (c) 2017 by Sven Hesse (DrMcCoy) <drmccoy@drmccoy.de>
+ * Copyright (c) 2017, 2019 by Sven Hesse (DrMcCoy) <drmccoy@drmccoy.de>
  *
  * dmc_unrar is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as
@@ -61,7 +61,18 @@
  * <https://github.com/DrMcCoy/dmc_unrar>.
  */
 
+/* Contributors:
+ *
+ * Amos Wenger <amoswenger@gmail.com>
+ *
+ */
+
 /* Version history:
+ *
+ * Someday, ????-??-?? (Version ?)
+ * - Fixed RAR5 file block extra data parsing
+ * - Fixed RAR4 UTF-16 filenames with non-Latin characters
+ * - Correctly implemented dmc_unrar_extract_file_with_callback()
  *
  * Sunday, 2017-03-19 (Version 1.5.1)
  * - Removed usage of variable name "unix"
@@ -1417,6 +1428,12 @@ static bool dmc_unrar_archive_seek(dmc_unrar_io *io, uint64_t offset) {
 	return result;
 }
 
+static uint64_t dmc_unrar_archive_tell(dmc_unrar_io *io) {
+	DMC_UNRAR_ASSERT(io);
+
+	return io->offset;
+}
+
 static size_t dmc_unrar_archive_read(dmc_unrar_io *io, void *buffer, size_t n) {
 	size_t result;
 	DMC_UNRAR_ASSERT(io);
@@ -2648,6 +2665,9 @@ static dmc_unrar_return dmc_unrar_rar5_read_file_header(dmc_unrar_archive *archi
 
 			if (!dmc_unrar_rar5_read_number(&archive->io, &size))
 				return DMC_UNRAR_READ_FAIL;
+
+			pos = dmc_unrar_archive_tell(&archive->io);
+
 			if (!dmc_unrar_rar5_read_number(&archive->io, &type))
 				return DMC_UNRAR_READ_FAIL;
 
@@ -3089,8 +3109,7 @@ static bool dmc_unrar_get_filename_utf16(const uint8_t *data, size_t data_size,
 		uint16_t *name_utf16, size_t *name_utf16_length) {
 
 	/* Unicode filenames in RAR archives might be UTF-16 encoded, and then
-	 * compressed with a by remembering a common high byte value and
-	 * some simple RLE.
+	 * compressed by remembering a common high byte value and some simple RLE.
 	 *
 	 * The data is split in a data section for RLE and a command section,
 	 * split by a 0-byte.
@@ -3119,7 +3138,7 @@ static bool dmc_unrar_get_filename_utf16(const uint8_t *data, size_t data_size,
 	utf16_data = data + utf16_data_begin + 1;
 
 	/* Common high byte. */
-	high_byte = *utf16_data++;
+	high_byte = *utf16_data++ << 8;
 	utf16_data_length--;
 
 	while (utf16_data_length > 0) {
@@ -3152,6 +3171,7 @@ static bool dmc_unrar_get_filename_utf16(const uint8_t *data, size_t data_size,
 			case 2: /* Full 2-byte UTF-16 code unit. */
 				if (utf16_data_length >= 2) {
 					name_utf16[(*name_utf16_length)++] = dmc_unrar_get_uint16le(utf16_data);
+					utf16_data += 2;
 					utf16_data_length -= 2;
 				}
 				break;
@@ -3624,7 +3644,7 @@ dmc_unrar_return dmc_unrar_extract_file_with_callback(dmc_unrar_archive *archive
 	void *opaque, dmc_unrar_extract_callback_func callback) {
 
 	size_t output_size = 0;
-	
+
 	if (!archive || !buffer)
 		return DMC_UNRAR_ARCHIVE_EMPTY;
 
