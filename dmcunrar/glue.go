@@ -94,9 +94,7 @@ func openArchiveInternal(fr *FileReader) (*Archive, error) {
 		}
 	}()
 
-	var err error
-
-	err = checkError("dmc_unrar_archive_init", C.dmc_unrar_archive_init(archive))
+	err := checkError("dmc_unrar_archive_init", C.dmc_unrar_archive_init(archive))
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +169,7 @@ func (a *Archive) GetFileStat(i int64) *C.dmc_unrar_file {
 }
 
 func (a *Archive) FileIsDirectory(i int64) bool {
-	return C.dmc_unrar_file_is_directory(a.archive, C.size_t(i)) == true
+	return bool(C.dmc_unrar_file_is_directory(a.archive, C.size_t(i)))
 }
 
 func (a *Archive) FileIsSupported(i int64) error {
