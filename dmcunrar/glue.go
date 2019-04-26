@@ -2,6 +2,8 @@ package dmcunrar
 
 /*
 #include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h>
 #include "dmc_unrar.h"
 
 // gateway functions
@@ -191,7 +193,7 @@ func (a *Archive) ExtractFile(ef *ExtractedFile, index int64) error {
 		buffer,                    // buffer
 		C.size_t(buffer_size),     // buffer_size
 		nil,                       // uncompressed_size
-		true,                      // validate_crc
+		C.bool(true),              // validate_crc
 		unsafe.Pointer(ef.opaque), // opaque
 		(C.dmc_unrar_extract_callback_func)(unsafe.Pointer(C.efCallbackGo_cgo)), // callback
 	))
@@ -325,7 +327,7 @@ func frSeekGo(opaque_ unsafe.Pointer, offset C.uint64_t) C.int {
 }
 
 //export efCallbackGo
-func efCallbackGo(opaque_ unsafe.Pointer, bufPtrPtr unsafe.Pointer, bufferSize *C.size_t, uncompressedSize C.size_t, ret *C.dmc_unrar_return) C.bool {
+func efCallbackGo(opaque_ unsafe.Pointer, bufPtrPtr unsafe.Pointer, bufferSize *C.size_t, uncompressedSize C.size_t, ret *C.dmc_unrar_return) bool {
 	opaque := (*C.ef_opaque)(opaque_)
 	id := int64(opaque.id)
 
