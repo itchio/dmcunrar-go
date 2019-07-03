@@ -10,11 +10,13 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/itchio/go-itchio/itchfs"
-	"github.com/itchio/wharf/counter"
-	"github.com/itchio/wharf/eos"
+	"github.com/itchio/headway/counter"
+	"github.com/itchio/headway/united"
+	"github.com/itchio/headway/tracker"
+	"github.com/itchio/headway/probar"
+	"github.com/itchio/httpkit/eos"
 
 	"github.com/itchio/dmcunrar-go/dmcunrar"
-	"github.com/itchio/httpkit/progress"
 )
 
 func main() {
@@ -75,14 +77,14 @@ func main() {
 			}
 		}
 	}
-	log.Printf("Extracting %d files, %s uncompressed", archive.GetFileCount(), progress.FormatBytes(uncompressedSize))
+	log.Printf("Extracting %d files, %s uncompressed", archive.GetFileCount(), united.FormatBytes(uncompressedSize))
 
 	extractEntry := func(i int64) {
 		name, _ := archive.GetFilename(i)
 
 		stat := archive.GetFileStat(i)
 		if stat == nil {
-			must(errors.New("null file stat!"))
+			must(errors.New("null file stat."))
 		}
 
 		if verbose {
@@ -104,16 +106,17 @@ func main() {
 
 		size := stat.GetUncompressedSize()
 
-		tracker := progress.NewTracker()
-		tracker.Bar().ShowCounters = false
+		tracker := tracker.New(tracker.Opts{
+			ByteAmount: &tracker.ByteAmount{Value: size},
+		})
+		pb := probar.New(tracker, probar.Opts{})
+
 		label := dest
 		maxLabel := 40
 		if len(label) > maxLabel {
 			label = label[len(label)-maxLabel:]
 		}
-		tracker.Bar().Postfix(label)
-		tracker.SetTotalBytes(size)
-		tracker.Start()
+		pb.SetPostfix(label)
 		defer tracker.Finish()
 
 		cw := counter.NewWriterCallback(func(count int64) {
