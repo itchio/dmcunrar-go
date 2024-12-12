@@ -52,6 +52,10 @@ type Archive struct {
 	archive *C.dmc_unrar_archive
 }
 
+type UnrarFile struct {
+	cFile *C.dmc_unrar_file
+}
+
 func OpenArchiveFromPath(name string) (*Archive, error) {
 	f, err := os.Open(name)
 	if err != nil {
@@ -164,8 +168,8 @@ func (a *Archive) GetFilename(i int64) (string, error) {
 	return C.GoString(filename), nil
 }
 
-func (a *Archive) GetFileStat(i int64) *C.dmc_unrar_file {
-	return C.dmc_unrar_get_file_stat(a.archive, C.size_t(i))
+func (a *Archive) GetFileStat(i int64) *UnrarFile {
+	return &UnrarFile{cFile: C.dmc_unrar_get_file_stat(a.archive, C.size_t(i))}
 }
 
 func (a *Archive) FileIsDirectory(i int64) bool {
@@ -176,8 +180,8 @@ func (a *Archive) FileIsSupported(i int64) error {
 	return checkError("dmc_unrar_file_is_supported", C.dmc_unrar_file_is_supported(a.archive, C.size_t(i)))
 }
 
-func (fs *C.dmc_unrar_file) GetUncompressedSize() int64 {
-	return int64(fs.uncompressed_size)
+func (uf *UnrarFile) GetUncompressedSize() int64 {
+	return int64(uf.cFile.uncompressed_size)
 }
 
 func (a *Archive) ExtractFile(ef *ExtractedFile, index int64) error {

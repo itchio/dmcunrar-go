@@ -11,9 +11,9 @@ import (
 
 	"github.com/itchio/go-itchio/itchfs"
 	"github.com/itchio/headway/counter"
-	"github.com/itchio/headway/united"
-	"github.com/itchio/headway/tracker"
 	"github.com/itchio/headway/probar"
+	"github.com/itchio/headway/tracker"
+	"github.com/itchio/headway/united"
 	"github.com/itchio/httpkit/eos"
 
 	"github.com/itchio/dmcunrar-go/dmcunrar"
