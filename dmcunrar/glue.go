@@ -23,12 +23,11 @@ typedef struct ef_opaque_tag {
 import "C"
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"reflect"
 	"unsafe"
-
-	"github.com/pkg/errors"
 )
 
 type FileReader struct {
@@ -59,12 +58,12 @@ type UnrarFile struct {
 func OpenArchiveFromPath(name string) (*Archive, error) {
 	f, err := os.Open(name)
 	if err != nil {
-		return nil, errors.WithStack(err)
+		return nil, fmt.Errorf("open archive: %w", err)
 	}
 
 	stats, err := f.Stat()
 	if err != nil {
-		return nil, errors.WithStack(err)
+		return nil, fmt.Errorf("stat archive: %w", err)
 	}
 
 	size := stats.Size()
@@ -145,7 +144,7 @@ func (a *Archive) GetFilename(i int64) (string, error) {
 		0,
 	)
 	if size == 0 {
-		return "", errors.Errorf("0-length filename for entry %d", i)
+		return "", fmt.Errorf("0-length filename for entry %d", i)
 	}
 
 	filename := (*C.char)(C.malloc(size))
@@ -157,12 +156,12 @@ func (a *Archive) GetFilename(i int64) (string, error) {
 		size,
 	)
 	if size == 0 {
-		return "", errors.Errorf("0-length filename for entry %d", i)
+		return "", fmt.Errorf("0-length filename for entry %d", i)
 	}
 
 	C.dmc_unrar_unicode_make_valid_utf8(filename)
 	if *filename == 0 {
-		return "", errors.Errorf("0-length filename (after make_valid_utf8) for entry %d", i)
+		return "", fmt.Errorf("0-length filename (after make_valid_utf8) for entry %d", i)
 	}
 
 	return C.GoString(filename), nil
@@ -367,5 +366,5 @@ func checkError(name string, code C.dmc_unrar_return) error {
 	}
 
 	str := C.dmc_unrar_strerror(code)
-	return errors.Errorf("%s: error %d: %s", name, code, C.GoString(str))
+	return fmt.Errorf("%s: error %d: %s", name, code, C.GoString(str))
 }
