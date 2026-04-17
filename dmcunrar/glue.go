@@ -23,6 +23,7 @@ typedef struct ef_opaque_tag {
 import "C"
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -53,6 +54,39 @@ type Archive struct {
 
 type UnrarFile struct {
 	cFile *C.dmc_unrar_file
+}
+
+type ErrorCode int
+
+const (
+	ErrorCodeOK                          ErrorCode = ErrorCode(C.DMC_UNRAR_OK)
+	ErrorCodeArchiveUnsupportedEncrypted ErrorCode = ErrorCode(C.DMC_UNRAR_ARCHIVE_UNSUPPORTED_ENCRYPTED)
+	ErrorCodeFileUnsupportedEncrypted    ErrorCode = ErrorCode(C.DMC_UNRAR_FILE_UNSUPPORTED_ENCRYPTED)
+)
+
+var ErrEncrypted = errors.New("rar data is encrypted")
+
+type Error struct {
+	Operation string
+	Code      ErrorCode
+	Message   string
+}
+
+func (e *Error) Error() string {
+	return fmt.Sprintf("%s: error %d: %s", e.Operation, e.Code, e.Message)
+}
+
+func (e *Error) Is(target error) bool {
+	return target == ErrEncrypted && e.IsEncrypted()
+}
+
+func (e *Error) IsEncrypted() bool {
+	switch e.Code {
+	case ErrorCodeArchiveUnsupportedEncrypted, ErrorCodeFileUnsupportedEncrypted:
+		return true
+	default:
+		return false
+	}
 }
 
 func OpenArchiveFromPath(name string) (*Archive, error) {
@@ -366,5 +400,9 @@ func checkError(name string, code C.dmc_unrar_return) error {
 	}
 
 	str := C.dmc_unrar_strerror(code)
-	return fmt.Errorf("%s: error %d: %s", name, code, C.GoString(str))
+	return &Error{
+		Operation: name,
+		Code:      ErrorCode(code),
+		Message:   C.GoString(str),
+	}
 }

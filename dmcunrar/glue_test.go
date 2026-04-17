@@ -2,8 +2,10 @@ package dmcunrar
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -40,9 +42,9 @@ func extractToBytes(t *testing.T, archive *Archive, index int64) []byte {
 
 func TestOpenArchiveFromPath(t *testing.T) {
 	tests := []struct {
-		name     string
-		archive  string
-		wantErr  bool
+		name    string
+		archive string
+		wantErr bool
 	}{
 		{"RAR5 simple", "simple.rar", false},
 		{"RAR5 explicit", "simple_rar5.rar", false},
@@ -126,9 +128,9 @@ func TestGetFileCount(t *testing.T) {
 
 func TestGetFilename(t *testing.T) {
 	tests := []struct {
-		archive   string
-		index     int64
-		wantName  string
+		archive  string
+		index    int64
+		wantName string
 	}{
 		{"simple.rar", 0, "hello.txt"},
 		{"multiple_files.rar", 0, "a.txt"},
@@ -157,7 +159,7 @@ func TestGetFileStat(t *testing.T) {
 		index    int64
 		wantSize int64
 	}{
-		{"simple.rar", 0, 13}, // "Hello, World!" = 13 bytes
+		{"simple.rar", 0, 13},        // "Hello, World!" = 13 bytes
 		{"multiple_files.rar", 0, 9}, // "Content A" = 9 bytes
 		{"compressed.rar", 0, 13},
 		{"with_dirs.rar", 0, 16}, // "Dir file content" = 16 bytes
@@ -211,6 +213,81 @@ func TestFileIsSupported(t *testing.T) {
 				t.Errorf("FileIsSupported() = %v, want nil", err)
 			}
 		})
+	}
+}
+
+func TestFileIsSupportedEncryptedFile(t *testing.T) {
+	archive := openGeneratedEncryptedArchive(t, "-psecret")
+
+	err := archive.FileIsSupported(0)
+	if err == nil {
+		t.Fatal("FileIsSupported() error = nil, want encrypted error")
+	}
+	if !errors.Is(err, ErrEncrypted) {
+		t.Fatalf("FileIsSupported() error = %v, want ErrEncrypted", err)
+	}
+
+	var unrarErr *Error
+	if !errors.As(err, &unrarErr) {
+		t.Fatalf("FileIsSupported() error = %T, want *Error", err)
+	}
+	if unrarErr.Operation != "dmc_unrar_file_is_supported" {
+		t.Fatalf("Operation = %q, want dmc_unrar_file_is_supported", unrarErr.Operation)
+	}
+	if unrarErr.Code != ErrorCodeFileUnsupportedEncrypted {
+		t.Fatalf("Code = %d, want %d", unrarErr.Code, ErrorCodeFileUnsupportedEncrypted)
+	}
+	if !unrarErr.IsEncrypted() {
+		t.Fatal("IsEncrypted() = false, want true")
+	}
+}
+
+func openGeneratedEncryptedArchive(t *testing.T, passwordFlag string) *Archive {
+	t.Helper()
+	archivePath := generateEncryptedArchive(t, passwordFlag)
+	archive, err := OpenArchiveFromPath(archivePath)
+	if err != nil {
+		t.Fatalf("failed to open generated archive: %v", err)
+	}
+	t.Cleanup(func() { archive.Free() })
+	return archive
+}
+
+func generateEncryptedArchive(t *testing.T, passwordFlag string) string {
+	t.Helper()
+	if _, err := exec.LookPath("rar"); err != nil {
+		t.Skip("rar command not available")
+	}
+
+	tmpDir := t.TempDir()
+	sourcePath := filepath.Join(tmpDir, "secret.txt")
+	if err := os.WriteFile(sourcePath, []byte("secret\n"), 0o644); err != nil {
+		t.Fatalf("failed to write source file: %v", err)
+	}
+
+	archivePath := filepath.Join(tmpDir, "encrypted.rar")
+	cmd := exec.Command("rar", "a", "-idq", passwordFlag, "encrypted.rar", "secret.txt")
+	cmd.Dir = tmpDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("rar failed: %v\n%s", err, output)
+	}
+
+	return archivePath
+}
+
+func TestArchiveEncryptedErrorMatchesSentinel(t *testing.T) {
+	err := &Error{
+		Operation: "dmc_unrar_archive_open",
+		Code:      ErrorCodeArchiveUnsupportedEncrypted,
+		Message:   "Unsupported archive feature: encryption",
+	}
+
+	if !errors.Is(err, ErrEncrypted) {
+		t.Fatalf("errors.Is(%v, ErrEncrypted) = false, want true", err)
+	}
+	if !err.IsEncrypted() {
+		t.Fatal("IsEncrypted() = false, want true")
 	}
 }
 
