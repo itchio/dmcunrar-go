@@ -1,16 +1,22 @@
 package dmcunrar
 
+// This package uses the dmc_unrar library defaults for resource caps
+// (MAX_FILE_COUNT, MAX_FILE_SIZE, MAX_TOTAL_SIZE, MAX_DICT_SIZE,
+// MAX_COMPRESSION_RATIO, MAX_PPMD_SIZE_MB). Consumers that want tighter
+// limits should set their own -D flags via a cgo CFLAGS directive in a
+// file in their own package.
+
 /*
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include "dmc_unrar.h"
 
-// gateway functions
-size_t frReadGo_cgo(void *opaque, void *buffer, size_t n);
-int frSeekGo_cgo(void *opaque, uint64_t offset);
-
-bool efCallbackGo_cgo(void *opaque, void **buffer, size_t *buffer_size, size_t uncompressed_size, dmc_unrar_return *err);
+// cgo gateway functions defined in glue.c
+dmc_unrar_io_handler *dmc_unrar_go_get_handler(void);
+bool efCallbackGo_cgo(void *opaque, void **buffer, uint64_t *buffer_size, uint64_t uncompressed_size, dmc_unrar_return *err);
+bool cancelGo_cgo(void *opaque);
+void dmc_unrar_go_set_cancel(dmc_unrar_archive *archive, dmc_unrar_cancel_func func, void *opaque);
 
 typedef struct fr_opaque_tag {
 	int64_t id;
@@ -19,15 +25,20 @@ typedef struct fr_opaque_tag {
 typedef struct ef_opaque_tag {
 	int64_t id;
 } ef_opaque;
+
+typedef struct cancel_opaque_tag {
+	int64_t id;
+} cancel_opaque;
 */
 import "C"
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"reflect"
+	"sync"
 	"unsafe"
 )
 
@@ -50,21 +61,38 @@ type ExtractedFile struct {
 type Archive struct {
 	fr      *FileReader
 	archive *C.dmc_unrar_archive
+	cancel  *cancelState
 }
 
 type UnrarFile struct {
 	cFile *C.dmc_unrar_file
 }
 
+type cancelState struct {
+	id     int64
+	opaque *C.cancel_opaque
+	mu     sync.Mutex
+	ctx    context.Context
+}
+
 type ErrorCode int
 
 const (
 	ErrorCodeOK                          ErrorCode = ErrorCode(C.DMC_UNRAR_OK)
+	ErrorCodeReadFail                    ErrorCode = ErrorCode(C.DMC_UNRAR_READ_FAIL)
+	ErrorCodeWriteFail                   ErrorCode = ErrorCode(C.DMC_UNRAR_WRITE_FAIL)
+	ErrorCodeSeekFail                    ErrorCode = ErrorCode(C.DMC_UNRAR_SEEK_FAIL)
+	ErrorCodeInvalidData                 ErrorCode = ErrorCode(C.DMC_UNRAR_INVALID_DATA)
 	ErrorCodeArchiveUnsupportedEncrypted ErrorCode = ErrorCode(C.DMC_UNRAR_ARCHIVE_UNSUPPORTED_ENCRYPTED)
 	ErrorCodeFileUnsupportedEncrypted    ErrorCode = ErrorCode(C.DMC_UNRAR_FILE_UNSUPPORTED_ENCRYPTED)
+	ErrorCodeFileCRC32Fail               ErrorCode = ErrorCode(C.DMC_UNRAR_FILE_CRC32_FAIL)
+	ErrorCodeUserCancel                  ErrorCode = ErrorCode(C.DMC_UNRAR_USER_CANCEL)
 )
 
-var ErrEncrypted = errors.New("rar data is encrypted")
+var (
+	ErrEncrypted  = errors.New("rar data is encrypted")
+	ErrUserCancel = errors.New("rar operation canceled")
+)
 
 type Error struct {
 	Operation string
@@ -77,7 +105,13 @@ func (e *Error) Error() string {
 }
 
 func (e *Error) Is(target error) bool {
-	return target == ErrEncrypted && e.IsEncrypted()
+	switch target {
+	case ErrEncrypted:
+		return e.IsEncrypted()
+	case ErrUserCancel:
+		return e.Code == ErrorCodeUserCancel
+	}
+	return false
 }
 
 func (e *Error) IsEncrypted() bool {
@@ -90,39 +124,70 @@ func (e *Error) IsEncrypted() bool {
 }
 
 func OpenArchiveFromPath(name string) (*Archive, error) {
+	f, stats, err := openAndStat(name)
+	if err != nil {
+		return nil, err
+	}
+	return openArchive(f, stats.Size(), nil)
+}
+
+func OpenArchiveFromPathContext(ctx context.Context, name string) (*Archive, error) {
+	if ctx == nil {
+		panic("dmcunrar: OpenArchiveFromPathContext called with nil context")
+	}
+	f, stats, err := openAndStat(name)
+	if err != nil {
+		return nil, err
+	}
+	return openArchive(f, stats.Size(), newCancelState(ctx))
+}
+
+func openAndStat(name string) (*os.File, os.FileInfo, error) {
 	f, err := os.Open(name)
 	if err != nil {
-		return nil, fmt.Errorf("open archive: %w", err)
+		return nil, nil, fmt.Errorf("open archive: %w", err)
 	}
-
 	stats, err := f.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("stat archive: %w", err)
+		f.Close()
+		return nil, nil, fmt.Errorf("stat archive: %w", err)
 	}
-
-	size := stats.Size()
-	return OpenArchive(f, size)
+	return f, stats, nil
 }
 
 func OpenArchive(reader io.ReaderAt, size int64) (*Archive, error) {
+	return openArchive(reader, size, nil)
+}
+
+func OpenArchiveContext(ctx context.Context, reader io.ReaderAt, size int64) (*Archive, error) {
+	if ctx == nil {
+		panic("dmcunrar: OpenArchiveContext called with nil context")
+	}
+	return openArchive(reader, size, newCancelState(ctx))
+}
+
+func openArchive(reader io.ReaderAt, size int64, cs *cancelState) (*Archive, error) {
 	fr := NewFileReader(reader, size)
 	success := false
 	defer func() {
 		if !success {
 			fr.Free()
+			if cs != nil {
+				cs.Free()
+			}
 		}
 	}()
 
-	a, err := openArchiveInternal(fr)
+	a, err := openArchiveInternal(fr, cs)
 	if err != nil {
 		return nil, err
 	}
 
 	success = true
-	return a, err
+	return a, nil
 }
 
-func openArchiveInternal(fr *FileReader) (*Archive, error) {
+func openArchiveInternal(fr *FileReader, cs *cancelState) (*Archive, error) {
 	archive := (*C.dmc_unrar_archive)(C.malloc(C.sizeof_dmc_unrar_archive))
 	success := false
 	defer func() {
@@ -131,23 +196,28 @@ func openArchiveInternal(fr *FileReader) (*Archive, error) {
 		}
 	}()
 
-	err := checkError("dmc_unrar_archive_init", C.dmc_unrar_archive_init(archive))
-	if err != nil {
+	if err := checkError("dmc_unrar_archive_init", C.dmc_unrar_archive_init(archive)); err != nil {
 		return nil, err
 	}
 
-	archive.io.func_read = (C.dmc_unrar_read_func)(unsafe.Pointer(C.frReadGo_cgo))
-	archive.io.func_seek = (C.dmc_unrar_seek_func)(unsafe.Pointer(C.frSeekGo_cgo))
+	archive.io.funcs = C.dmc_unrar_go_get_handler()
 	archive.io.opaque = unsafe.Pointer(fr.opaque)
+	archive.io.size = C.dmc_unrar_size_t(fr.size)
 
-	err = checkError("dmc_unrar_archive_open", C.dmc_unrar_archive_open(archive, C.uint64_t(fr.size)))
-	if err != nil {
-		return nil, err
+	if cs != nil {
+		C.dmc_unrar_go_set_cancel(archive,
+			(C.dmc_unrar_cancel_func)(unsafe.Pointer(C.cancelGo_cgo)),
+			unsafe.Pointer(cs.opaque))
+	}
+
+	if err := checkError("dmc_unrar_archive_open", C.dmc_unrar_archive_open(archive)); err != nil {
+		return nil, annotateCancel(err, cs)
 	}
 
 	a := &Archive{
 		fr:      fr,
 		archive: archive,
+		cancel:  cs,
 	}
 
 	success = true
@@ -155,15 +225,42 @@ func openArchiveInternal(fr *FileReader) (*Archive, error) {
 }
 
 func (a *Archive) Free() {
+	if a.archive != nil {
+		C.dmc_unrar_archive_close(a.archive)
+		C.free(unsafe.Pointer(a.archive))
+		a.archive = nil
+	}
+
 	if a.fr != nil {
 		a.fr.Free()
 		a.fr = nil
 	}
 
-	if a.archive != nil {
-		C.dmc_unrar_archive_close(a.archive)
-		a.archive = nil
+	if a.cancel != nil {
+		a.cancel.Free()
+		a.cancel = nil
 	}
+}
+
+// SetCancelContext installs or replaces the context used for cooperative
+// cancellation. ctx must not be nil; pass context.Background() for "no
+// cancellation". Safe to call concurrently with an in-flight cancel poll
+// on the same archive; the swap is synchronized internally.
+func (a *Archive) SetCancelContext(ctx context.Context) {
+	if ctx == nil {
+		panic("dmcunrar: SetCancelContext called with nil context")
+	}
+	if a.archive == nil {
+		panic("dmcunrar: SetCancelContext called on freed archive")
+	}
+	if a.cancel == nil {
+		a.cancel = newCancelState(ctx)
+		C.dmc_unrar_go_set_cancel(a.archive,
+			(C.dmc_unrar_cancel_func)(unsafe.Pointer(C.cancelGo_cgo)),
+			unsafe.Pointer(a.cancel.opaque))
+		return
+	}
+	a.cancel.setCtx(ctx)
 }
 
 func (a *Archive) GetFileCount() int64 {
@@ -173,7 +270,7 @@ func (a *Archive) GetFileCount() int64 {
 func (a *Archive) GetFilename(i int64) (string, error) {
 	size := C.dmc_unrar_get_filename(
 		a.archive,
-		C.size_t(i),
+		C.dmc_unrar_size_t(i),
 		(*C.char)(nil),
 		0,
 	)
@@ -181,11 +278,11 @@ func (a *Archive) GetFilename(i int64) (string, error) {
 		return "", fmt.Errorf("0-length filename for entry %d", i)
 	}
 
-	filename := (*C.char)(C.malloc(size))
+	filename := (*C.char)(C.malloc(C.size_t(size)))
 	defer C.free(unsafe.Pointer(filename))
 	size = C.dmc_unrar_get_filename(
 		a.archive,
-		C.size_t(i),
+		C.dmc_unrar_size_t(i),
 		filename,
 		size,
 	)
@@ -202,15 +299,15 @@ func (a *Archive) GetFilename(i int64) (string, error) {
 }
 
 func (a *Archive) GetFileStat(i int64) *UnrarFile {
-	return &UnrarFile{cFile: C.dmc_unrar_get_file_stat(a.archive, C.size_t(i))}
+	return &UnrarFile{cFile: C.dmc_unrar_get_file_stat(a.archive, C.dmc_unrar_size_t(i))}
 }
 
 func (a *Archive) FileIsDirectory(i int64) bool {
-	return bool(C.dmc_unrar_file_is_directory(a.archive, C.size_t(i)))
+	return bool(C.dmc_unrar_file_is_directory(a.archive, C.dmc_unrar_size_t(i)))
 }
 
 func (a *Archive) FileIsSupported(i int64) error {
-	return checkError("dmc_unrar_file_is_supported", C.dmc_unrar_file_is_supported(a.archive, C.size_t(i)))
+	return checkError("dmc_unrar_file_is_supported", C.dmc_unrar_file_is_supported(a.archive, C.dmc_unrar_size_t(i)))
 }
 
 func (uf *UnrarFile) GetUncompressedSize() int64 {
@@ -218,24 +315,40 @@ func (uf *UnrarFile) GetUncompressedSize() int64 {
 }
 
 func (a *Archive) ExtractFile(ef *ExtractedFile, index int64) error {
-	buffer_size := 256 * 1024
-	buffer := unsafe.Pointer(C.malloc(C.size_t(buffer_size)))
+	ef.err = nil
+	a.fr.err = nil
+
+	const bufferSize = 256 * 1024
+	buffer := unsafe.Pointer(C.malloc(C.size_t(bufferSize)))
 	defer C.free(buffer)
 
-	err := checkError("dmc_unrar_extract_file_with_callback", C.dmc_unrar_extract_file_with_callback(
-		a.archive,                 // archive
-		C.size_t(index),           // index
-		buffer,                    // buffer
-		C.size_t(buffer_size),     // buffer_size
-		nil,                       // uncompressed_size
-		C.bool(true),              // validate_crc
-		unsafe.Pointer(ef.opaque), // opaque
-		(C.dmc_unrar_extract_callback_func)(unsafe.Pointer(C.efCallbackGo_cgo)), // callback
+	cErr := checkError("dmc_unrar_extract_file_with_callback", C.dmc_unrar_extract_file_with_callback(
+		a.archive,
+		C.dmc_unrar_size_t(index),
+		buffer,
+		C.dmc_unrar_size_t(bufferSize),
+		nil,
+		C.bool(true),
+		unsafe.Pointer(ef.opaque),
+		(C.dmc_unrar_extract_callback_func)(unsafe.Pointer(C.efCallbackGo_cgo)),
 	))
-	if err != nil {
-		return err
+
+	if cErr != nil {
+		if ef.err != nil {
+			return fmt.Errorf("%w: writer: %w", cErr, ef.err)
+		}
+		if a.fr.err != nil {
+			return fmt.Errorf("%w: reader: %w", cErr, a.fr.err)
+		}
+		return annotateCancel(cErr, a.cancel)
 	}
 
+	if ef.err != nil {
+		return fmt.Errorf("extract: writer error (C returned OK): %w", ef.err)
+	}
+	if a.fr.err != nil {
+		return fmt.Errorf("extract: reader error (C returned OK): %w", a.fr.err)
+	}
 	return nil
 }
 
@@ -265,16 +378,77 @@ func NewExtractedFile(writer io.Writer) *ExtractedFile {
 	return ef
 }
 
+func newCancelState(ctx context.Context) *cancelState {
+	opaque := (*C.cancel_opaque)(C.malloc(C.sizeof_cancel_opaque))
+	cs := &cancelState{
+		ctx:    ctx,
+		opaque: opaque,
+	}
+	reserveCancelId(cs)
+	return cs
+}
+
+func (cs *cancelState) setCtx(ctx context.Context) {
+	cs.mu.Lock()
+	cs.ctx = ctx
+	cs.mu.Unlock()
+}
+
+func (cs *cancelState) getCtx() context.Context {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.ctx
+}
+
+func (cs *cancelState) Free() {
+	if cs.id > 0 {
+		freeCancelId(cs.id)
+		cs.id = 0
+	}
+	if cs.opaque != nil {
+		C.free(unsafe.Pointer(cs.opaque))
+		cs.opaque = nil
+	}
+}
+
+// annotateCancel wraps err with the Go-side context cause when the C library
+// returned DMC_UNRAR_USER_CANCEL. Leaves err unchanged otherwise.
+func annotateCancel(err error, cs *cancelState) error {
+	if err == nil || cs == nil {
+		return err
+	}
+	var unrarErr *Error
+	if !errors.As(err, &unrarErr) || unrarErr.Code != ErrorCodeUserCancel {
+		return err
+	}
+	ctx := cs.getCtx()
+	if ctx == nil {
+		return err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("%w: %w", err, ctxErr)
+	}
+	return err
+}
+
 func (fr *FileReader) Seek(offset int64, whence int) (int64, error) {
+	var final int64
 	switch whence {
 	case io.SeekStart:
-		fr.offset = offset
+		final = offset
 	case io.SeekCurrent:
-		fr.offset += offset
+		final = fr.offset + offset
 	case io.SeekEnd:
-		fr.offset = fr.size + offset
+		final = fr.size + offset
+	default:
+		return fr.offset, fmt.Errorf("invalid whence %d", whence)
 	}
 
+	if final < 0 || final > fr.size {
+		return fr.offset, fmt.Errorf("seek out of range: %d (size=%d)", final, fr.size)
+	}
+
+	fr.offset = final
 	return fr.offset, nil
 }
 
@@ -303,7 +477,7 @@ func (ef *ExtractedFile) Free() {
 }
 
 //export frReadGo
-func frReadGo(opaque_ unsafe.Pointer, buffer unsafe.Pointer, n C.size_t) C.size_t {
+func frReadGo(opaque_ unsafe.Pointer, buffer unsafe.Pointer, n C.size_t) C.uint64_t {
 	opaque := (*C.fr_opaque)(opaque_)
 	id := int64(opaque.id)
 
@@ -320,78 +494,138 @@ func frReadGo(opaque_ unsafe.Pointer, buffer unsafe.Pointer, n C.size_t) C.size_
 	if fr.offset+size > fr.size {
 		size = fr.size - fr.offset
 	}
-
-	h := reflect.SliceHeader{
-		Data: uintptr(buffer),
-		Cap:  int(size),
-		Len:  int(size),
-	}
-	buf := *(*[]byte)(unsafe.Pointer(&h))
-
-	readBytes, err := fr.reader.ReadAt(buf, fr.offset)
-	fr.offset += int64(readBytes)
-	if err != nil {
-		fr.err = err
+	if size <= 0 {
 		return 0
 	}
 
-	return C.size_t(readBytes)
+	buf := unsafe.Slice((*byte)(buffer), size)
+
+	readBytes, err := fr.reader.ReadAt(buf, fr.offset)
+	fr.offset += int64(readBytes)
+	if err != nil && err != io.EOF {
+		fr.err = err
+		return C.uint64_t(readBytes)
+	}
+
+	return C.uint64_t(readBytes)
 }
 
 //export frSeekGo
-func frSeekGo(opaque_ unsafe.Pointer, offset C.uint64_t) C.int {
+func frSeekGo(opaque_ unsafe.Pointer, offset C.int64_t, origin C.int) C.bool {
 	opaque := (*C.fr_opaque)(opaque_)
 	id := int64(opaque.id)
 
 	p, ok := fileReaders.Load(id)
 	if !ok {
-		return 0
+		return C.bool(false)
 	}
 	fr, ok := (p).(*FileReader)
 	if !ok {
-		return 0
+		return C.bool(false)
 	}
 
-	_, err := fr.Seek(int64(offset), io.SeekStart)
-	if err != nil {
+	var whence int
+	switch origin {
+	case C.int(C.DMC_UNRAR_SEEK_SET):
+		whence = io.SeekStart
+	case C.int(C.DMC_UNRAR_SEEK_CUR):
+		whence = io.SeekCurrent
+	case C.int(C.DMC_UNRAR_SEEK_END):
+		whence = io.SeekEnd
+	default:
+		return C.bool(false)
+	}
+
+	if _, err := fr.Seek(int64(offset), whence); err != nil {
 		fr.err = err
-		return -1
+		return C.bool(false)
 	}
+	return C.bool(true)
+}
 
-	return 0
+//export frTellGo
+func frTellGo(opaque_ unsafe.Pointer) C.int64_t {
+	opaque := (*C.fr_opaque)(opaque_)
+	id := int64(opaque.id)
+
+	p, ok := fileReaders.Load(id)
+	if !ok {
+		return C.int64_t(-1)
+	}
+	fr, ok := (p).(*FileReader)
+	if !ok {
+		return C.int64_t(-1)
+	}
+	return C.int64_t(fr.offset)
 }
 
 //export efCallbackGo
-func efCallbackGo(opaque_ unsafe.Pointer, bufPtrPtr unsafe.Pointer, bufferSize *C.size_t, uncompressedSize C.size_t, ret *C.dmc_unrar_return) bool {
+func efCallbackGo(opaque_ unsafe.Pointer, bufPtrPtr unsafe.Pointer, bufferSize *C.uint64_t, uncompressedSize C.uint64_t, ret *C.dmc_unrar_return) C.bool {
+	_ = bufferSize // *buffer and *buffer_size are intentionally left unchanged; caller owns the buffer.
+
 	opaque := (*C.ef_opaque)(opaque_)
 	id := int64(opaque.id)
 
 	p, ok := extractedFiles.Load(id)
 	if !ok {
-		return false
+		*ret = C.DMC_UNRAR_WRITE_FAIL
+		return C.bool(false)
 	}
 	ef, ok := (p).(*ExtractedFile)
 	if !ok {
-		return false
+		*ret = C.DMC_UNRAR_WRITE_FAIL
+		return C.bool(false)
+	}
+
+	size := int(uncompressedSize)
+	if size == 0 {
+		return C.bool(true)
 	}
 
 	bufPtr := *(*unsafe.Pointer)(bufPtrPtr)
-
-	size := int64(uncompressedSize)
-	h := reflect.SliceHeader{
-		Data: uintptr(bufPtr),
-		Cap:  int(size),
-		Len:  int(size),
+	if bufPtr == nil {
+		return C.bool(true)
 	}
-	buf := *(*[]byte)(unsafe.Pointer(&h))
+	buf := unsafe.Slice((*byte)(bufPtr), size)
 
-	_, err := ef.writer.Write(buf)
+	n, err := ef.writer.Write(buf)
 	if err != nil {
 		ef.err = err
-		return false
+		*ret = C.DMC_UNRAR_WRITE_FAIL
+		return C.bool(false)
+	}
+	if n < size {
+		ef.err = io.ErrShortWrite
+		*ret = C.DMC_UNRAR_WRITE_FAIL
+		return C.bool(false)
+	}
+	return C.bool(true)
+}
+
+//export cancelGo
+func cancelGo(opaque_ unsafe.Pointer) C.bool {
+	opaque := (*C.cancel_opaque)(opaque_)
+	id := int64(opaque.id)
+
+	p, ok := cancelStates.Load(id)
+	if !ok {
+		return C.bool(true)
+	}
+	cs, ok := (p).(*cancelState)
+	if !ok {
+		return C.bool(true)
 	}
 
-	return true
+	ctx := cs.getCtx()
+	if ctx == nil {
+		return C.bool(true)
+	}
+	select {
+	case <-ctx.Done():
+		return C.bool(false)
+	default:
+		return C.bool(true)
+	}
 }
 
 func checkError(name string, code C.dmc_unrar_return) error {

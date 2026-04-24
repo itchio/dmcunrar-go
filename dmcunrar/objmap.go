@@ -43,3 +43,19 @@ func reserveEfId(obj *ExtractedFile) {
 func freeEfId(id int64) {
 	extractedFiles.Delete(id)
 }
+
+//==============================
+// cancelState
+//==============================
+
+var cancelStates sync.Map
+
+func reserveCancelId(obj *cancelState) {
+	obj.id = atomic.AddInt64(&seed, 1)
+	obj.opaque.id = C.int64_t(obj.id)
+	cancelStates.Store(obj.id, obj)
+}
+
+func freeCancelId(id int64) {
+	cancelStates.Delete(id)
+}
