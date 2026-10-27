@@ -1,6 +1,6 @@
 dmc_unrar.c is lifted from:
 
-https://github.com/leafo/dmc_unrar/blob/1bfa0cb2ed1481f9170373cdb5cdae7afb75879f/dmc_unrar.c
+https://github.com/leafo/dmc_unrar/blob/666f0a4797e35125456995674d263157b0eb4f40/dmc_unrar.c
 
 Hardened fork of https://github.com/DrMcCoy/dmc_unrar with additional
 cooperative cancellation, resource caps, archive-bomb defenses,

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -501,5 +502,35 @@ func TestOpenArchive_FromBytesReader(t *testing.T) {
 	want := "Hello, World!"
 	if string(content) != want {
 		t.Errorf("extracted = %q, want %q", string(content), want)
+	}
+}
+
+func TestGetComment(t *testing.T) {
+	archive, err := OpenArchiveFromPath("testdata/comment.rar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer archive.Free()
+	comment, err := archive.GetComment(64 * 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(comment), "Setup=activator.exe") {
+		t.Fatalf("comment: %q", comment)
+	}
+	if _, err := archive.GetComment(16); err == nil {
+		t.Fatal("expected the limit to apply")
+	}
+	plain, err := OpenArchiveFromPath("testdata/simple.rar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plain.Free()
+	if comment, err := plain.GetComment(64 * 1024); err != nil || comment != nil {
+		t.Fatalf("no comment: %q, %v", comment, err)
+	}
+	utf16 := []byte{';', 0, 'S', 0, 'e', 0, 't', 0, 'u', 0, 'p', 0, '=', 0, 0xe9, 0}
+	if got := string(commentUTF8(utf16)); got != ";Setup=é" {
+		t.Fatalf("utf16: %q", got)
 	}
 }

@@ -2,11 +2,13 @@ package dmcunrar
 
 // This package uses the dmc_unrar library defaults for resource caps
 // (MAX_FILE_COUNT, MAX_FILE_SIZE, MAX_TOTAL_SIZE, MAX_DICT_SIZE,
-// MAX_COMPRESSION_RATIO, MAX_PPMD_SIZE_MB). Consumers that want tighter
-// limits should set their own -D flags via a cgo CFLAGS directive in a
-// file in their own package.
+// MAX_PPMD_SIZE_MB), except the compression ratio: the library's 1000:1
+// default refuses to open archives holding ordinary zero-filled files
+// (empty Unity .resS entries pack 1151:1), and the size caps plus the
+// caller's extraction budget already bound the output.
 
 /*
+#cgo CFLAGS: -DDMC_UNRAR_MAX_COMPRESSION_RATIO=1000000u
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -39,6 +41,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"unicode/utf16"
 	"unsafe"
 )
 
@@ -639,4 +642,46 @@ func checkError(name string, code C.dmc_unrar_return) error {
 		Code:      ErrorCode(code),
 		Message:   C.GoString(str),
 	}
+}
+
+// GetComment returns the archive comment, decompressed and as UTF-8, of at
+// most limit bytes. RAR 2.9 and 3.6 store comments as ASCII or UTF-16LE,
+// RAR 5 as UTF-8. A missing comment returns nil.
+func (a *Archive) GetComment(limit int) ([]byte, error) {
+	size := C.dmc_unrar_get_archive_comment(a.archive, nil, 0)
+	if size == 0 {
+		return nil, nil
+	}
+	if int(size) > limit {
+		return nil, fmt.Errorf("archive comment of %d bytes exceeds limit of %d", size, limit)
+	}
+	buf := C.malloc(C.size_t(size))
+	defer C.free(buf)
+	size = C.dmc_unrar_get_archive_comment(a.archive, buf, size)
+	if size == 0 {
+		return nil, fmt.Errorf("archive comment could not be read")
+	}
+	return commentUTF8(C.GoBytes(buf, C.int(size))), nil
+}
+
+// commentUTF8 converts a UTF-16LE comment, recognized by NUL high bytes in
+// most of its code units, to UTF-8 and passes anything else through.
+func commentUTF8(b []byte) []byte {
+	if len(b) < 2 {
+		return b
+	}
+	zeros := 0
+	for i := 1; i < len(b); i += 2 {
+		if b[i] == 0 {
+			zeros++
+		}
+	}
+	if zeros*4 < len(b) {
+		return b
+	}
+	units := make([]uint16, 0, len(b)/2)
+	for i := 0; i+1 < len(b); i += 2 {
+		units = append(units, uint16(b[i])|uint16(b[i+1])<<8)
+	}
+	return []byte(string(utf16.Decode(units)))
 }
