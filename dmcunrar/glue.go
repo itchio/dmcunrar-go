@@ -2,13 +2,10 @@ package dmcunrar
 
 // This package uses the dmc_unrar library defaults for resource caps
 // (MAX_FILE_COUNT, MAX_FILE_SIZE, MAX_TOTAL_SIZE, MAX_DICT_SIZE,
-// MAX_PPMD_SIZE_MB), except the compression ratio: the library's 1000:1
-// default refuses to open archives holding ordinary zero-filled files
-// (empty Unity .resS entries pack 1151:1), and the size caps plus the
-// caller's extraction budget already bound the output.
+// MAX_COMPRESSION_RATIO, MAX_PPMD_SIZE_MB). Consumers that want other
+// limits set their own -D flags through CGO_CFLAGS at build time.
 
 /*
-#cgo CFLAGS: -DDMC_UNRAR_MAX_COMPRESSION_RATIO=1000000u
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
